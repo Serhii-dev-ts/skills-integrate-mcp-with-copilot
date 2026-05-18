@@ -5,10 +5,13 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel
+import json
 import os
+import secrets
 from pathlib import Path
 
 app = FastAPI(title="Mergington High School API",
@@ -77,6 +80,66 @@ activities = {
     }
 }
 
+current_dir = Path(__file__).parent
+teachers_file = current_dir / "teachers.json"
+
+try:
+    with teachers_file.open("r", encoding="utf-8") as f:
+        teacher_data = json.load(f)
+except FileNotFoundError:
+    teacher_data = {"teachers": []}
+
+teacher_credentials = {
+    teacher["username"]: teacher["password"]
+    for teacher in teacher_data.get("teachers", [])
+}
+sessions: dict[str, str] = {}
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+def create_token() -> str:
+    return secrets.token_urlsafe(16)
+
+
+def get_token_from_header(request: Request) -> str:
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authorization required")
+    return auth_header.split("Bearer ", 1)[1].strip()
+
+
+def authenticate_teacher(request: Request) -> str:
+    token = get_token_from_header(request)
+    username = sessions.get(token)
+    if not username:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return username
+
+
+@app.post("/login")
+def login(credentials: LoginRequest):
+    if credentials.username not in teacher_credentials:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    expected_password = teacher_credentials[credentials.username]
+    if credentials.password != expected_password:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    token = create_token()
+    sessions[token] = credentials.username
+    return {"token": token, "username": credentials.username}
+
+
+@app.post("/logout")
+def logout(request: Request):
+    token = get_token_from_header(request)
+    sessions.pop(token, None)
+    return {"message": "Logged out"}
+
 
 @app.get("/")
 def root():
@@ -89,8 +152,10 @@ def get_activities():
 
 
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
+def signup_for_activity(activity_name: str, email: str, request: Request):
     """Sign up a student for an activity"""
+    authenticate_teacher(request)
+
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -111,8 +176,10 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
+def unregister_from_activity(activity_name: str, email: str, request: Request):
     """Unregister a student from an activity"""
+    authenticate_teacher(request)
+
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
